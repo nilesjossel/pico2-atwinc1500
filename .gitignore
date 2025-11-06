@@ -1,2 +1,12 @@
-build
-!.vscode/*
+# Build files
+build/
+*.o
+*.elf
+*.bin
+
+# VSCode
+.vscode/
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
