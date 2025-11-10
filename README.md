@@ -27,6 +27,7 @@ SCK      -->  GP18
 MOSI     -->  GP19
 MISO     -->  GP16
 CS       -->  GP17
+EN       -->  3.3V
 WAKE     -->  GP20
 RESET    -->  GP21
 IRQ      -->  GP22
