@@ -40,7 +40,6 @@ GND      -->  GND
 
 ```bash
 cd ~/pico
-git clone https://github.com/yourusername/WINC1500_PICO2.git
 cd WINC1500_PICO2
 ```
 

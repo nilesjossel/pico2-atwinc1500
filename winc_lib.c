@@ -110,8 +110,10 @@ typedef struct {
 
 // Forward declarations for functions used before definition
 static void sock_state(uint8_t sock, int news);
-static bool winc_mesh_init(uint8_t node_id, const char *node_name);
-static void winc_mesh_process(void);
+
+// Forward declarations for functions implemented in winc_mesh.c
+bool winc_mesh_init(uint8_t node_id, const char *node_name);
+void winc_mesh_process(void);
 
 // ===== GLOBAL CONTEXT (some from winc_sock)=====
 typedef struct {
@@ -163,7 +165,7 @@ typedef struct {
     } mesh;
 } winc_ctx_t;
 
-static winc_ctx_t g_ctx;    // Global context
+winc_ctx_t g_ctx;    // Global context (accessible to winc_mesh.c)
 
 // ====== UTILITY FUNCTIONS (from winc_wifi and winc_sock) ====== 
 typedef struct {uint8_t cmd, addr[3], zeros[7];} CMD_MSG_A;
@@ -457,7 +459,8 @@ static bool hif_start(uint8_t gid, uint8_t op, int dlen) {
     return ok;
 }
 
-static bool hif_put(uint16_t gop, void *dp1, int dlen1, void *dp2, int dlen2, int oset) {
+// Non-static so winc_mesh.c can use it
+bool hif_put(uint16_t gop, void *dp1, int dlen1, void *dp2, int dlen2, int oset) {
     uint32_t addr, a, dlen = HIF_HDR_SIZE + (dlen2 ? oset + dlen2 : dlen1);
     uint8_t gid = (uint8_t)(gop >> 8), op = (uint8_t)gop;
     uint8_t hdr[8] = {gid, op & 0x7f, (uint8_t)dlen, (uint8_t)(dlen >> 8)};
@@ -524,7 +527,8 @@ static char *sock_err_str(int err) {
     return (err < sizeof(sock_errs) / sizeof(char *) ? sock_errs[err] : "");
 }
 
-static int open_sock_server(int portnum, bool tcp, SOCK_HANDLER handler) {
+// Non-static so winc_mesh.c can use it
+int open_sock_server(int portnum, bool tcp, SOCK_HANDLER handler) {
     int sock, smin = tcp ? MIN_TCP_SOCK : MIN_UDP_SOCK, smax = tcp ? MAX_TCP_SOCK : MAX_UDP_SOCK;
     static uint16_t session = 1;
 
@@ -775,16 +779,22 @@ bool winc_init(uint8_t node_id, const char *node_name) {
     msdelay(10);
 
     // Initialize chip
+    printf("Disabling CRC and initializing WINC chip...\n");
     disable_crc();
     if (!chip_init()) {
-        printf("Failed to initialize WINC chip\n");
+        printf("ERROR: Failed to initialize WINC chip\n");
         return false;
     }
-    
+    printf("WINC chip initialized successfully\n");
+
     chip_get_info();
+    printf("Firmware version: %d.%d.%d\n", g_ctx.fw_major, g_ctx.fw_minor, g_ctx.fw_patch);
 
     // Initialize mesh
-    return winc_mesh_init(node_id, node_name);
+    printf("Starting mesh initialization...\n");
+    bool mesh_result = winc_mesh_init(node_id, node_name);
+    printf("Mesh init returned: %s\n", mesh_result ? "SUCCESS" : "FAILURE");
+    return mesh_result;
 }
 
 void winc_poll(void) {
@@ -801,11 +811,7 @@ void winc_mesh_set_callback(void (*callback)(uint8_t src_node, uint8_t *data, ui
     g_ctx.mesh.data_callback = callback;
 }
 
-bool winc_mesh_send(uint8_t dst_node, uint8_t *data, uint16_t len) {
-    // This will be implemented in winc_mesh.c
-    // For now, return false
-    return false;
-}
+// winc_mesh_send is implemented in winc_mesh.c
 
 void winc_mesh_print_routes(void) {
     printf("Mesh Routing Table (Node %u - \"%s\"):\n", g_ctx.mesh.my_node_id, g_ctx.mesh.my_name);
@@ -856,16 +862,4 @@ const char* winc_get_node_name(void) {
     return g_ctx.mesh.my_name;
 }
 
-// Placeholder mesh functions (will be in winc_mesh.c)
-bool winc_mesh_init(uint8_t node_id, const char *node_name) {
-    // Basic initialization - full implementation in winc_mesh.c
-    g_ctx.mesh.my_node_id = node_id;
-    strncpy(g_ctx.mesh.my_name, node_name, sizeof(g_ctx.mesh.my_name) - 1);
-    g_ctx.mesh.enabled = true;
-    printf("Mesh initialized: Node %u (%s)\n", node_id, node_name);
-    return true;
-}
-
-void winc_mesh_process(void) {
-    // Will be implemented in winc_mesh.c
-}
+// Note: winc_mesh_init and winc_mesh_process are implemented in winc_mesh.c

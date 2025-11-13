@@ -48,6 +48,12 @@ typedef union {
     int val;
 } RESP_MSG;
 
+// P2P connection state tracking
+static volatile bool p2p_connected = false;
+static volatile bool p2p_dhcp_done = false;
+static uint32_t p2p_my_ip = 0;
+static uint32_t p2p_peer_ip = 0;
+
 // External context from winc_lib.c
 typedef struct {
     // Hardware pins
@@ -117,6 +123,11 @@ static void mesh_update_route(uint8_t node_id, uint8_t next_hop, uint8_t hop_cou
 
 // ===== P2P CONTROL FUNCTIONS =====
 
+// Define P2P/WPS operations if not already defined
+#ifndef GOP_WPS_REQ
+#define GOP_WPS_REQ GIDOP(GID_WIFI, 73)
+#endif
+
 // Enable P2P mode on ATWINC1500
 static bool p2p_enable(uint8_t channel) {
     P2P_ENABLE_CMD cmd;
@@ -153,16 +164,41 @@ static bool p2p_disable(void) {
     return ok;
 }
 
+// Start WPS connection (for P2P pairing)
+static bool p2p_start_wps_connection(void) {
+    // WPS request structure
+    typedef struct {
+        uint8_t trigger_type;  // 4 = WPS_PBC
+        uint8_t x[3];
+        uint8_t pin[8];
+    } WPS_REQ;
+
+    WPS_REQ req;
+    bool ok;
+
+    printf("Initiating WPS Push Button Configuration...\n");
+
+    memset(&req, 0, sizeof(req));
+    req.trigger_type = 4;  // WPS_PBC
+
+    ok = hif_put(GOP_WPS_REQ, &req, sizeof(req), 0, 0, 0);
+
+    if (!ok) {
+        printf("ERROR: WPS request failed\n");
+    }
+
+    return ok;
+}
+
 // ===== MESH INITIALIZATION =====
 bool winc_mesh_init(uint8_t node_id, const char *node_name) {
-    if (g_ctx.verbose)
-        printf("Initializing mesh: Node %u (%s)\n", node_id, node_name);
+    printf("Initializing mesh: Node %u (%s)\n", node_id, node_name);
 
     // Store mesh config
     g_ctx.mesh.my_node_id = node_id;
     strncpy(g_ctx.mesh.my_name, node_name, sizeof(g_ctx.mesh.my_name) - 1);
     g_ctx.mesh.my_name[sizeof(g_ctx.mesh.my_name) - 1] = '\0';
-    
+
     // Initialize routing table
     memset(g_ctx.mesh.routes, 0, sizeof(g_ctx.mesh.routes));
     g_ctx.mesh.route_count = 0;
@@ -170,23 +206,77 @@ bool winc_mesh_init(uint8_t node_id, const char *node_name) {
     g_ctx.mesh.last_beacon = 0;
 
     // Enable P2P mode on configured channel
+    printf("Enabling P2P mode on channel %d...\n", WINC_P2P_CHANNEL);
     if (!p2p_enable(WINC_P2P_CHANNEL)) {
-        printf("Failed to enable P2P mode\n");
+        printf("ERROR: Failed to enable P2P mode\n");
         return false;
     }
+    printf("P2P mode enabled successfully\n");
 
+    // Determine role based on node ID
+    if (node_id == 1) {
+        printf("\n*** NODE ROLE: GROUP OWNER (GO) ***\n");
+        printf("This node will create a P2P group and wait for clients\n");
+        printf("Starting WPS-PBC to create P2P group...\n");
+    } else {
+        printf("\n*** NODE ROLE: CLIENT ***\n");
+        printf("This node will connect to the Group Owner\n");
+        printf("IMPORTANT: Make sure Node 1 (GO) is running first!\n");
+        printf("Starting WPS-PBC to connect to Group Owner...\n");
+    }
+
+    // Enable verbose mode temporarily to see connection events
+    int saved_verbose = g_ctx.verbose;
+    g_ctx.verbose = 1;
+
+    // Trigger WPS Push Button Configuration
+    // Note: Both GO and client call this - WINC firmware will auto-negotiate
+    if (!p2p_start_wps_connection()) {
+        printf("ERROR: Failed to start WPS-PBC connection\n");
+        p2p_disable();
+        g_ctx.verbose = saved_verbose;
+        return false;
+    }
+    printf("WPS-PBC initiated successfully\n");
+
+    // Wait for P2P connection and DHCP
+    printf("\nWaiting for P2P connection events...\n");
+    printf("Watch for: 'State change: connected' and 'DHCP conf' messages\n");
+    printf("This may take 10-30 seconds...\n\n");
+
+    uint32_t start_time = to_ms_since_boot(get_absolute_time());
+    uint32_t timeout = 30000;  // 30 second timeout
+    bool connection_seen = false;
+    bool dhcp_seen = false;
+
+    while ((to_ms_since_boot(get_absolute_time()) - start_time) < timeout) {
+        // Poll for interrupts to process connection events
+        if (gpio_get(g_ctx.pins.irq) == 0) {
+            extern void interrupt_handler(void);
+            interrupt_handler();
+            // Check if we got connection or DHCP event
+            // (we'd see it in the interrupt handler printf output)
+            connection_seen = true;  // Simplified - just track that we got events
+        }
+        sleep_ms(100);
+    }
+
+    g_ctx.verbose = saved_verbose;
+    printf("\nConnection attempt completed\n");
+
+    printf("Creating UDP socket on port %d...\n", WINC_MESH_PORT);
     g_ctx.mesh.udp_socket = open_sock_server(WINC_MESH_PORT, false, mesh_packet_handler);
     if (g_ctx.mesh.udp_socket < 0) {
-        printf("Failed to create mesh UDP socket\n");
+        printf("ERROR: Failed to create mesh UDP socket (returned %d)\n", g_ctx.mesh.udp_socket);
         p2p_disable();
         return false;
     }
+    printf("UDP socket created successfully (socket %d)\n", g_ctx.mesh.udp_socket);
 
     g_ctx.mesh.enabled = true;
-    
-    if (g_ctx.verbose)
-        printf("Mesh initialized: Socket %d on port %d\n", 
-               g_ctx.mesh.udp_socket, WINC_MESH_PORT);
+
+    printf("Mesh initialization complete!\n");
+    printf("P2P group should now be formed and ready for communication\n\n");
 
     return true;
 }
@@ -220,15 +310,22 @@ static bool mesh_send_beacon(void) {
     }
     beacon.neighbor_count = idx;
 
-    if (g_ctx.verbose > 1)
-        printf("Sending beacon: %u neighbors\n", beacon.neighbor_count);
+    printf("[BEACON] Sending beacon from node %u (%u neighbors, socket=%d, size=%u)\n",
+           g_ctx.mesh.my_node_id, beacon.neighbor_count, g_ctx.mesh.udp_socket, sizeof(beacon));
 
-    return put_sock_sendto(g_ctx.mesh.udp_socket, &beacon, sizeof(beacon));
+    bool result = put_sock_sendto(g_ctx.mesh.udp_socket, &beacon, sizeof(beacon));
+    if (!result) {
+        printf("[BEACON] ERROR: Failed to send beacon!\n");
+    }
+    return result;
 }
 
 // Handle received beacon
 static void mesh_handle_beacon(winc_mesh_beacon_t *beacon) {
     uint32_t now = to_ms_since_boot(get_absolute_time());
+
+    printf("[BEACON] Received beacon from node %u (%s), %u neighbors\n",
+           beacon->node_id, beacon->node_name, beacon->neighbor_count);
 
     if (g_ctx.verbose > 1)
         printf("Beacon from node %u (%s), %u neighbors\n",
@@ -256,20 +353,24 @@ bool winc_mesh_send(uint8_t dst_node, uint8_t *data, uint16_t len) {
         winc_mesh_hdr_t hdr;
         uint8_t payload[];
     } __attribute__((packed)) *pkt;
-    
+
     int next_hop;
     bool result = false;
 
     if (!g_ctx.mesh.enabled) {
-        printf("Mesh not enabled\n");
+        printf("ERROR: Mesh not enabled (P2P mode or UDP socket failed during init)\n");
+        return false;
+    }
+
+    if (g_ctx.mesh.udp_socket < 0) {
+        printf("ERROR: UDP socket invalid (socket=%d)\n", g_ctx.mesh.udp_socket);
         return false;
     }
 
     // Find route to destination
     next_hop = mesh_find_route(dst_node);
     if (next_hop < 0) {
-        if (g_ctx.verbose)
-            printf("No route to node %u\n", dst_node);
+        printf("ERROR: No route to node %u (known nodes: %u)\n", dst_node, g_ctx.mesh.route_count);
         return false;
     }
 
@@ -295,6 +396,11 @@ bool winc_mesh_send(uint8_t dst_node, uint8_t *data, uint16_t len) {
         printf("Sending %u bytes to node %u via hop %d\n", len, dst_node, next_hop);
 
     result = put_sock_sendto(g_ctx.mesh.udp_socket, pkt, sizeof(winc_mesh_hdr_t) + len);
+
+    if (!result) {
+        printf("ERROR: put_sock_sendto failed (socket=%d, len=%u)\n",
+               g_ctx.mesh.udp_socket, sizeof(winc_mesh_hdr_t) + len);
+    }
 
     free(pkt);
     return result;
@@ -405,28 +511,30 @@ static void mesh_packet_handler(uint8_t sock, int rxlen) {
     uint8_t buf[1600];
     winc_mesh_hdr_t *hdr;
 
+    printf("[RX] Packet received on socket %u, length=%d\n", sock, rxlen);
+
     if (rxlen <= 0) {
-        if (g_ctx.verbose && rxlen < 0)
-            printf("Mesh socket error: %d\n", rxlen);
+        if (rxlen < 0)
+            printf("[RX] ERROR: Socket error %d\n", rxlen);
         return;
     }
 
     // Get packet data
     if (!get_sock_data(sock, buf, rxlen)) {
-        printf("Failed to get mesh packet data\n");
+        printf("[RX] ERROR: Failed to get mesh packet data\n");
         return;
     }
 
     hdr = (winc_mesh_hdr_t*)buf;
 
-    if (g_ctx.verbose > 1)
-        printf("Mesh packet: type=%u, src=%u, dst=%u, hops=%u, len=%u\n",
-               hdr->msg_type, hdr->src_node, hdr->dst_node, 
-               hdr->hop_count, hdr->payload_len);
+    printf("[RX] Mesh packet: type=%u, src=%u, dst=%u, hops=%u, len=%u\n",
+           hdr->msg_type, hdr->src_node, hdr->dst_node,
+           hdr->hop_count, hdr->payload_len);
 
     // Process based on message type
     switch (hdr->msg_type) {
         case MESH_MSG_BEACON:
+            printf("[RX] Processing BEACON from node %u\n", hdr->src_node);
             mesh_handle_beacon((winc_mesh_beacon_t*)buf);
             break;
 
@@ -455,13 +563,21 @@ static void mesh_packet_handler(uint8_t sock, int rxlen) {
 
 // Process mesh events (called from winc_poll)
 void winc_mesh_process(void) {
+    static bool first_call = true;
     uint32_t now = to_ms_since_boot(get_absolute_time());
+
+    if (first_call) {
+        printf("[MESH] winc_mesh_process called for first time (enabled=%d)\n", g_ctx.mesh.enabled);
+        first_call = false;
+    }
 
     if (!g_ctx.mesh.enabled)
         return;
 
     // Send periodic beacons
     if (now - g_ctx.mesh.last_beacon > WINC_MESH_BEACON_INTERVAL_MS) {
+        printf("[MESH] Time to send beacon (last=%lu, now=%lu, interval=%d)\n",
+               g_ctx.mesh.last_beacon, now, WINC_MESH_BEACON_INTERVAL_MS);
         mesh_send_beacon();
         g_ctx.mesh.last_beacon = now;
     }

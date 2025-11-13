@@ -1,5 +1,25 @@
 # ATWINC1500 WiFi Driver Library for Raspberry Pi Pico / Pico 2
 
+# Force Ninja generator
+set(CMAKE_GENERATOR "Ninja" CACHE INTERNAL "" FORCE)
+
+# == DO NOT EDIT THE FOLLOWING LINES for the Raspberry Pi Pico VS Code Extension to work ==
+if(WIN32)
+    set(USERHOME $ENV{USERPROFILE})
+else()
+    set(USERHOME $ENV{HOME})
+endif()
+set(sdkVersion 2.2.0)
+set(toolchainVersion 14_2_Rel1)
+set(picotoolVersion 2.2.0)
+set(picoVscode ${USERHOME}/.pico-sdk/cmake/pico-vscode.cmake)
+if (EXISTS ${picoVscode})
+    include(${picoVscode})
+endif()
+# ====================================================================================
+set(PICO_BOARD pico2 CACHE STRING "Board type")
+SET(PICO_PLATFORM rp2350)
+
 cmake_minimum_required(VERSION 3.13)
 
 set(CMAKE_C_STANDARD 11)
@@ -7,7 +27,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # Pico SDK path (auto-detected or set manually)
-# set(PICO_SDK_PATH "C:/Users/niles/pico/pico-sdk")
+#set(PICO_SDK_PATH "C:/Users/niles/pico/pico-sdk")
 
 # Board selection: pico, pico2, or pico_w, pico2_w
 set(PICO_BOARD pico2 CACHE STRING "Board type")
@@ -27,9 +47,8 @@ pico_sdk_init()
 add_library(winc1500 STATIC
     winc_lib.c
     winc_mesh.c
-    winc_wifi.c
-    winc_sock.c
-    winc_p2p.c
+    # winc_wifi.c and winc_sock.c are now integrated into winc_lib.c
+    # winc_p2p.c removed for now (P2P functionality in winc_lib.c)
 )
 
 target_include_directories(winc1500 PUBLIC
@@ -39,7 +58,35 @@ target_include_directories(winc1500 PUBLIC
 target_link_libraries(winc1500
     pico_stdlib
     hardware_spi
+    hardware_irq
+    hardware_interp
+    hardware_clocks
 )
+
+# ============================================================================
+# Main Executable: WINC1500_PICO2
+# ============================================================================
+
+add_executable(WINC1500_PICO2 WINC1500_PICO2.c)
+
+target_link_libraries(WINC1500_PICO2
+    winc1500
+)
+
+# Node configuration for WINC1500_PICO2
+if(DEFINED MY_NODE_ID)
+    target_compile_definitions(WINC1500_PICO2 PRIVATE MY_NODE_ID=${MY_NODE_ID})
+    message(STATUS "Building WINC1500_PICO2 with NODE_ID=${MY_NODE_ID}")
+endif()
+
+if(DEFINED MY_NODE_NAME)
+    target_compile_definitions(WINC1500_PICO2 PRIVATE MY_NODE_NAME="${MY_NODE_NAME}")
+    message(STATUS "Building WINC1500_PICO2 with NODE_NAME=${MY_NODE_NAME}")
+endif()
+
+pico_enable_stdio_uart(WINC1500_PICO2 1)
+pico_enable_stdio_usb(WINC1500_PICO2 1)
+pico_add_extra_outputs(WINC1500_PICO2)
 
 # ============================================================================
 # Example: Mesh Network Node
