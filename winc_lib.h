@@ -190,6 +190,32 @@ uint8_t winc_get_node_id(void);
  */
 const char* winc_get_node_name(void);
 
+/**
+ * Start AP mode (SoftAP)
+ *
+ * @param ssid SSID for the access point
+ * @param password Password (NULL or empty for open network)
+ * @param channel WiFi channel (1-11)
+ * @return true on success, false on failure
+ */
+bool winc_start_ap(const char *ssid, const char *password, uint8_t channel);
+
+/**
+ * Stop AP mode
+ *
+ * @return true on success, false on failure
+ */
+bool winc_stop_ap(void);
+
+/**
+ * Connect to AP (station mode)
+ *
+ * @param ssid SSID of the access point
+ * @param password Password (NULL for open network)
+ * @return true on success, false on failure
+ */
+bool winc_connect_sta(const char *ssid, const char *password);
+
 // ============================================================================
 // INTERNAL TYPES (for advanced users)
 // ============================================================================
@@ -227,6 +253,17 @@ typedef struct {
     uint32_t last_seen;
     bool active;
 } winc_route_t;
+
+// AP configuration 
+typedef struct {
+    char ssid[33];           // SSID for AP
+    uint8_t channel;         // WiFi channel (1-11)
+    uint8_t sec_type;        // Security: 1=open, 2=WEP, 3=WPA/WPA2
+    uint8_t key_len;         // Password length
+    char key[64];            // Password (for WPA)
+    uint8_t ssid_hide;       // 0=broadcast SSID, 1=hidden
+    uint8_t dhcp_enable;     // 1=enable DHCP server
+} AP_CONFIG;
 
 // ===== WINC TYPE DEFINITIONS (from winc_wifi.h and winc_sock.h) =====
 #ifndef MIN
@@ -281,6 +318,12 @@ typedef struct {
 #define CRED_NO_STORE   0
 #define CRED_STORE      3
 #define REQ_DATA        0x80
+
+// AP Mode operations (around line 280)
+#define GOP_AP_ENABLE       GIDOP(GID_WIFI, 71)  // Enable AP mode
+#define GOP_AP_DISABLE      GIDOP(GID_WIFI, 72)  // Disable AP mode  
+#define GOP_AP_ASSOC_INFO   GIDOP(GID_WIFI, 75)  // Client association info
+#define GOP_DHCP_CONF_AP    GIDOP(GID_WIFI, 76)  // DHCP conf for AP mode
 
 // Socket definitions
 #define MIN_SOCKET      0

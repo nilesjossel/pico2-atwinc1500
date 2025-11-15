@@ -107,7 +107,6 @@ typedef struct {
 typedef struct {
     uint8_t channel;
 } P2P_ENABLE_CMD;
-
 // Forward declarations for functions used before definition
 static void sock_state(uint8_t sock, int news);
 
@@ -163,6 +162,14 @@ typedef struct {
         // Data callback
         void (*data_callback)(uint8_t, uint8_t*, uint16_t);
     } mesh;
+
+    // Connection state tracking
+    struct {
+        bool connected;
+        bool dhcp_done;
+        bool ap_mode;
+        uint32_t my_ip;
+    } connection_state;
 } winc_ctx_t;
 
 winc_ctx_t g_ctx;    // Global context (accessible to winc_mesh.c)
@@ -527,6 +534,10 @@ static char *sock_err_str(int err) {
     return (err < sizeof(sock_errs) / sizeof(char *) ? sock_errs[err] : "");
 }
 
+// Forward declarations
+static bool put_sock_bind(uint8_t sock, uint16_t port);
+static void sock_state(uint8_t sock, int news);
+
 // Non-static so winc_mesh.c can use it
 int open_sock_server(int portnum, bool tcp, SOCK_HANDLER handler) {
     int sock, smin = tcp ? MIN_TCP_SOCK : MIN_UDP_SOCK, smax = tcp ? MAX_TCP_SOCK : MAX_UDP_SOCK;
@@ -538,6 +549,13 @@ int open_sock_server(int portnum, bool tcp, SOCK_HANDLER handler) {
             g_ctx.sockets[sock].session = session++;
             g_ctx.sockets[sock].handler = handler;
             sock_state(sock, STATE_BINDING);
+
+            // If network is already ready, bind immediately
+            if (g_ctx.connection_state.dhcp_done) {
+                printf("[SOCKET] Network already ready, binding socket %d immediately\n", sock);
+                put_sock_bind(sock, portnum);
+            }
+
             return sock;
         }
     }
@@ -552,11 +570,20 @@ static void sock_state(uint8_t sock, int news) {
 static bool put_sock_bind(uint8_t sock, uint16_t port) {
     SOCKET *sp = &g_ctx.sockets[sock];
     BIND_CMD bc = {
-        .saddr = {.family = IP_FAMILY, .port = swap16(port), .ip = -1},
+        .saddr = {.family = IP_FAMILY, .port = swap16(port), .ip = 0},  // INADDR_ANY (0.0.0.0)
         .sock = sock, .x = 0, .session = g_ctx.sockets[sock].session};
 
     memcpy(&sp->addr, &bc.saddr, sizeof(SOCK_ADDR));
-    return hif_put(GOP_BIND, &bc, sizeof(bc), 0, 0, 0);
+
+    if (g_ctx.verbose)
+        printf("[BIND] Binding socket %d to port %d (IP=0.0.0.0 INADDR_ANY)\n", sock, port);
+
+    bool result = hif_put(GOP_BIND, &bc, sizeof(bc), 0, 0, 0);
+
+    if (!result && g_ctx.verbose)
+        printf("[BIND] ERROR: Failed to send bind command for socket %d\n", sock);
+
+    return result;
 }
 
 static bool put_sock_listen(uint8_t sock) {
@@ -584,10 +611,38 @@ static bool put_sock_send(uint8_t sock, void *data, int len) {
 
 bool put_sock_sendto(uint8_t sock, void *data, int len) {
     SOCKET *sp = &g_ctx.sockets[sock];
+
+    // For mesh UDP broadcasts, use broadcast address and local port if not set
+    uint32_t dest_ip = sp->addr.ip;
+    uint16_t dest_port = sp->addr.port;
+
+    if (dest_ip == 0) {
+        dest_ip = 0xFFFFFFFF;  // 255.255.255.255 (broadcast)
+    }
+
+    if (dest_port == 0) {
+        dest_port = sp->localport;  // Send to same port we're listening on
+    }
+
+    // Debug output
+    if (g_ctx.verbose) {
+        printf("[SENDTO] sock=%d, state=%d, family=%d, port=%d, IP=%u.%u.%u.%u, len=%d\n",
+               sock, sp->state, sp->addr.family, dest_port,
+               (dest_ip >> 0) & 0xFF, (dest_ip >> 8) & 0xFF,
+               (dest_ip >> 16) & 0xFF, (dest_ip >> 24) & 0xFF, len);
+    }
+
     SENDTO_CMD sc = {
-        .saddr = {sp->addr.family, sp->addr.port, sp->addr.ip},
+        .saddr = {sp->addr.family, swap16(dest_port), dest_ip},  // FIXED: byte swap port
         .sock = sock, .len = len, .x = 0, .session = sp->session, .x2 = 0};
-    return hif_put(GOP_SENDTO | REQ_DATA, &sc, sizeof(sc), data, len, UDP_DATA_OSET);
+
+    bool result = hif_put(GOP_SENDTO | REQ_DATA, &sc, sizeof(sc), data, len, UDP_DATA_OSET);
+
+    if (!result && g_ctx.verbose) {
+        printf("[SENDTO] ERROR: hif_put failed!\n");
+    }
+
+    return result;
 }
 
 static bool put_sock_close(uint8_t sock) {
@@ -632,20 +687,47 @@ static void check_sock(uint16_t gop, RESP_MSG *rmp) {
     SOCKET *sp;
     uint8_t sock, sock2;
 
-    if (gop == GOP_DHCP_CONF) {
+    if (gop == GOP_DHCP_CONF || gop == GOP_AP_ENABLE || gop == GOP_DHCP_CONF_AP) {
+        // Bind all pending sockets when DHCP completes (client) or AP enables (AP mode)
+        const char *event_name = (gop == GOP_DHCP_CONF) ? "GOP_DHCP_CONF" :
+                                  (gop == GOP_AP_ENABLE) ? "GOP_AP_ENABLE" : "GOP_DHCP_CONF_AP";
+        printf("[%s] Checking for sockets to bind...\n", event_name);
+        int bound_count = 0;
         for (sock = MIN_SOCKET; sock < MAX_SOCKETS; sock++) {
             sp = &g_ctx.sockets[sock];
-            if (sp->state == STATE_BINDING)
+            if (sp->state == STATE_BINDING) {
+                printf("[EVENT] Binding socket %d (port=%d)\n", sock, sp->localport);
                 put_sock_bind(sock, sp->localport);
+                bound_count++;
+            }
+        }
+        if (bound_count == 0) {
+            printf("[EVENT] No sockets in STATE_BINDING to bind\n");
+        } else {
+            printf("[EVENT] Sent bind command for %d socket(s)\n", bound_count);
         }
     }
     else if (gop == GOP_BIND && (sock = rmp->bind.sock) < MAX_SOCKETS &&
              g_ctx.sockets[sock].state == STATE_BINDING) {
+        printf("[GOP_BIND] Socket %d transitioning to STATE_BOUND\n", sock);
         sock_state(sock, STATE_BOUND);
-        if (sock < MIN_UDP_SOCK)
+        if (sock < MIN_UDP_SOCK) {
+            printf("[GOP_BIND] TCP socket %d: sending LISTEN\n", sock);
             put_sock_listen(sock);
-        else
+        } else {
+            printf("[GOP_BIND] UDP socket %d: sending RECVFROM\n", sock);
             put_sock_recvfrom(sock);
+        }
+    }
+    else if (gop == GOP_BIND) {
+        // GOP_BIND received but socket state mismatch
+        if (rmp->bind.sock < MAX_SOCKETS) {
+            printf("[GOP_BIND] WARNING: Socket %d state=%d (expected STATE_BINDING=%d)\n",
+                   rmp->bind.sock, g_ctx.sockets[rmp->bind.sock].state, STATE_BINDING);
+        } else {
+            printf("[GOP_BIND] ERROR: Invalid socket number %d (max=%d)\n",
+                   rmp->bind.sock, MAX_SOCKETS);
+        }
     }
     else if (gop == GOP_RECVFROM && (sock = rmp->recv.sock) < MAX_SOCKETS &&
              (sp = &g_ctx.sockets[sock])->state == STATE_BOUND) {
@@ -699,10 +781,52 @@ void interrupt_handler(void) {
     ok = ok && hlen > 0 && hif_get(addr + HIF_HDR_SIZE, rmp, hlen);
 
     // Act on response
-    if (gop == GOP_STATE_CHANGE && ok)
+    if (gop == GOP_STATE_CHANGE && ok) {
         sprintf(temps, rmp->val == 0 ? "disconnected" : rmp->val == 1 ? "connected" : "fail");
-    else if (gop == GOP_DHCP_CONF && ok)
+
+        // Track connection state
+        if (rmp->val == 1) {
+            g_ctx.connection_state.connected = true;
+            printf("[STATE] WiFi connected!\n");
+        } else if (rmp->val == 0) {
+            g_ctx.connection_state.connected = false;
+            g_ctx.connection_state.dhcp_done = false;
+            printf("[STATE] WiFi disconnected!\n");
+        }
+    }
+    else if (gop == GOP_DHCP_CONF && ok) {
         sprintf(temps, "%u.%u.%u.%u gate %u.%u.%u.%u", IP_BYTES(rmp->dhcp.self), IP_BYTES(rmp->dhcp.gate));
+
+        // Track DHCP state
+        g_ctx.connection_state.dhcp_done = true;
+        g_ctx.connection_state.my_ip = rmp->dhcp.self;
+        printf("[STATE] DHCP complete! IP: %u.%u.%u.%u\n", IP_BYTES(rmp->dhcp.self));
+    }
+    else if (gop == GOP_AP_ENABLE && ok) {
+        sprintf(temps, "AP mode enabled");
+        printf("[STATE] AP mode enabled!\n");
+
+        // Set AP mode flags - AP is "connected" immediately
+        g_ctx.connection_state.connected = true;    // AP is always "connected"
+        g_ctx.connection_state.ap_mode = true;
+        g_ctx.connection_state.dhcp_done = true;    // AP is "ready" like DHCP complete
+
+        // AP has static IP (typically 192.168.1.1), set a placeholder
+        g_ctx.connection_state.my_ip = 0xC0A80101;  // 192.168.1.1
+    }
+    else if (gop == GOP_DHCP_CONF_AP && ok) {
+        sprintf(temps, "AP DHCP server configured");
+        printf("[STATE] AP DHCP server ready!\n");
+
+        // Ensure flags are set (should already be set by GOP_AP_ENABLE)
+        g_ctx.connection_state.connected = true;
+        g_ctx.connection_state.ap_mode = true;
+        g_ctx.connection_state.dhcp_done = true;
+    }
+    else if (gop == GOP_AP_ASSOC_INFO) {
+        sprintf(temps, "Client association info");
+        printf("[STATE] Client %s AP\n", ok ? "associated with" : "disconnected from");
+    }
     else if (gop == GOP_BIND && ok)
         sprintf(temps, "0x%X", rmp->val);
     else if (gop == GOP_ACCEPT && ok)
@@ -731,6 +855,98 @@ void interrupt_handler(void) {
     
     if (g_ctx.verbose > 1)
         printf("Interrupt complete %s\n", ok ? "OK" : "error");
+}
+
+// ====== AP MODE FUNCTIONS ======
+
+// Start AP mode (SoftAP)
+bool winc_start_ap(const char *ssid, const char *password, uint8_t channel) {
+    AP_CONFIG ap_cfg;
+
+    printf("Starting AP mode: %s (channel %u)\n", ssid, channel);
+
+    memset(&ap_cfg, 0, sizeof(ap_cfg));
+    strncpy(ap_cfg.ssid, ssid, 32);
+    ap_cfg.channel = channel;
+
+    if (password && strlen(password) > 0) {
+        ap_cfg.sec_type = AUTH_PSK;  // WPA2
+        ap_cfg.key_len = strlen(password);
+        strncpy(ap_cfg.key, password, 63);
+    } else {
+        ap_cfg.sec_type = AUTH_OPEN;  // Open network
+    }
+
+    ap_cfg.ssid_hide = 0;      // Broadcast SSID
+    ap_cfg.dhcp_enable = 1;    // Enable DHCP server
+
+    bool ok = hif_put(GOP_AP_ENABLE, &ap_cfg, sizeof(ap_cfg), 0, 0, 0);
+
+    if (!ok) {
+        printf("ERROR: Failed to start AP mode\n");
+        return false;
+    }
+
+    printf("AP mode command sent, waiting for ready...\n");
+
+    // Wait for AP to start
+    uint32_t start = to_ms_since_boot(get_absolute_time());
+
+    while ((to_ms_since_boot(get_absolute_time()) - start) < 10000) {
+        if (gpio_get(g_ctx.pins.irq) == 0) {
+            interrupt_handler();
+        }
+        sleep_ms(100);
+    }
+
+    printf("AP mode active!\n");
+    return true;
+}
+
+// Stop AP mode
+bool winc_stop_ap(void) {
+    printf("Stopping AP mode\n");
+    return hif_put(GOP_AP_DISABLE, NULL, 0, 0, 0, 0);
+}
+
+// Connect to AP (station mode)
+bool winc_connect_sta(const char *ssid, const char *password) {
+    printf("Connecting to AP: %s\n", ssid);
+
+    if (!join_net((char*)ssid, (char*)password)) {
+        printf("ERROR: Failed to start connection\n");
+        return false;
+    }
+
+    printf("Connection initiated, waiting for DHCP...\n");
+
+    uint32_t start = to_ms_since_boot(get_absolute_time());
+
+    while ((to_ms_since_boot(get_absolute_time()) - start) < 15000) {
+        if (gpio_get(g_ctx.pins.irq) == 0) {
+            interrupt_handler();
+        }
+
+        if (g_ctx.connection_state.dhcp_done) {
+            printf("Connected and got IP!\n");
+
+            // Brief stabilization delay (no interrupt polling to avoid state machine issues)
+            sleep_ms(1000);
+
+            // Final connection verification
+            if (!g_ctx.connection_state.connected) {
+                printf("ERROR: Connection lost after DHCP\n");
+                return false;
+            }
+
+            printf("Connection ready!\n");
+            return true;
+        }
+        sleep_ms(100);
+    }
+
+    printf("ERROR: Connection/DHCP timeout\n");
+    return false;
 }
 
 // ====== PUBLIC API IMPLEMENTATION ======
@@ -790,10 +1006,11 @@ bool winc_init(uint8_t node_id, const char *node_name) {
     chip_get_info();
     printf("Firmware version: %d.%d.%d\n", g_ctx.fw_major, g_ctx.fw_minor, g_ctx.fw_patch);
 
-    // Initialize mesh
-    printf("Starting mesh initialization...\n");
+    // Initialize mesh networking (will configure AP or Client mode based on node_id)
+    printf("\nStarting mesh initialization...\n");
     bool mesh_result = winc_mesh_init(node_id, node_name);
     printf("Mesh init returned: %s\n", mesh_result ? "SUCCESS" : "FAILURE");
+
     return mesh_result;
 }
 
