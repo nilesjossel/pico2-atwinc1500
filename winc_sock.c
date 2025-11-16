@@ -20,6 +20,7 @@
 #include <stdbool.h>
 #include "pico/stdlib.h"
 #include "winc_wifi.h"
+#include "winc_telemetry.h"
 #include "winc_sock.h"
 
 SOCKET sockets[MAX_SOCKETS];

@@ -243,18 +243,28 @@ bool winc_mesh_init(uint8_t node_id, const char *node_name) {
         }
     }
 
-    // Create socket AFTER network ready
-    printf("\nNetwork ready, creating UDP socket...\n");
+    printf("\nWaiting for network to stabilize...\n");
+    uint32_t stabilize_start = to_ms_since_boot(get_absolute_time());
 
-    // Give connection extra time to fully establish
-    sleep_ms(2000);
+    while ((to_ms_since_boot(get_absolute_time()) - stabilize_start) < 3000) {
+        winc_poll();
 
-    // Verify connection before creating socket
+        if (g_ctx.connection_state.connected && g_ctx.connection_state.dhcp_done) {
+            printf("Network ready (connected=%d, dhcp=%d)\n",
+                   g_ctx.connection_state.connected, g_ctx.connection_state.dhcp_done);
+            break;
+        }
+        sleep_ms(100);
+    }
+
     if (!g_ctx.connection_state.connected || !g_ctx.connection_state.dhcp_done) {
-        printf("ERROR: Network not ready (connected=%d, dhcp=%d)\n",
+        printf("ERROR: Network not ready after stabilization period\n");
+        printf("  connected=%d, dhcp_done=%d\n",
                g_ctx.connection_state.connected, g_ctx.connection_state.dhcp_done);
         return false;
     }
+
+    printf("Creating UDP socket on port %d...\n", WINC_MESH_PORT);
 
     g_ctx.mesh.udp_socket = open_sock_server(WINC_MESH_PORT, false, mesh_packet_handler);
 

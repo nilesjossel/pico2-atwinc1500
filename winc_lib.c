@@ -60,6 +60,21 @@ typedef struct {
     uint16_t session;
 } CLOSE_CMD;
 
+typedef struct {
+    SOCK_ADDR server_addr; 
+    uint8_t sock;           
+    uint8_t ssl_flags;      
+    uint16_t local_port;    
+    uint32_t reserved;      
+} CONNECT_CMD;
+
+// TCP Connect Response Structure
+typedef struct {
+    uint8_t sock;          
+    int8_t error;          
+    uint16_t reserved;     
+} CONNECT_RESP_MSG;
+
 // Response messages
 typedef struct {
     uint32_t self, gate, dns, mask, lease;
@@ -538,21 +553,24 @@ static char *sock_err_str(int err) {
 static bool put_sock_bind(uint8_t sock, uint16_t port);
 static void sock_state(uint8_t sock, int news);
 
-// Non-static so winc_mesh.c can use it
 int open_sock_server(int portnum, bool tcp, SOCK_HANDLER handler) {
     int sock, smin = tcp ? MIN_TCP_SOCK : MIN_UDP_SOCK, smax = tcp ? MAX_TCP_SOCK : MAX_UDP_SOCK;
     static uint16_t session = 1;
+    SOCKET *sp;
 
     for (sock = smin; sock < smax; sock++) {
         if (!g_ctx.sockets[sock].state) {
-            g_ctx.sockets[sock].localport = portnum;
-            g_ctx.sockets[sock].session = session++;
-            g_ctx.sockets[sock].handler = handler;
-            sock_state(sock, STATE_BINDING);
+            sp = &g_ctx.sockets[sock];
 
-            // If network is already ready, bind immediately
+            memset(sp, 0, sizeof(SOCKET));
+            sp->localport = portnum;
+            sp->session = session++;
+            sp->handler = handler;
+            sp->addr.family = IP_FAMILY;
+            sp->state = STATE_BINDING;
+
             if (g_ctx.connection_state.dhcp_done) {
-                printf("[SOCKET] Network already ready, binding socket %d immediately\n", sock);
+                printf("[SOCKET] Network ready, binding socket %d immediately\n", sock);
                 put_sock_bind(sock, portnum);
             }
 
@@ -612,16 +630,20 @@ static bool put_sock_send(uint8_t sock, void *data, int len) {
 bool put_sock_sendto(uint8_t sock, void *data, int len) {
     SOCKET *sp = &g_ctx.sockets[sock];
 
-    // For mesh UDP broadcasts, use broadcast address and local port if not set
+    if (sp->state != STATE_BOUND) {
+        printf("[SENDTO] ERROR: Socket %d not bound (state=%d)\n", sock, sp->state);
+        return false;
+    }
+
     uint32_t dest_ip = sp->addr.ip;
     uint16_t dest_port = sp->addr.port;
 
     if (dest_ip == 0) {
-        dest_ip = 0xFFFFFFFF;  // 255.255.255.255 (broadcast)
+        dest_ip = 0xFFFFFFFF;
     }
 
     if (dest_port == 0) {
-        dest_port = sp->localport;  // Send to same port we're listening on
+        dest_port = sp->localport;
     }
 
     // Debug output
@@ -651,6 +673,26 @@ static bool put_sock_close(uint8_t sock) {
     memset(&g_ctx.sockets[sock], 0, sizeof(SOCKET));
     return ok;
 }
+
+bool put_sock_connect(uint8_t sock, uint32_t server_ip, uint16_t server_port) {
+    SOCKET *sp = &g_ctx.sockets[sock];
+
+    CONNECT_CMD cmd = {
+        .server_addr = {
+            .family = IP_FAMILY,
+            .port = swap16(server_port),
+            .ip = server_ip
+        },
+        .sock = sock,
+        .ssl_flag = 0,
+        .local_port = swap16(sp->localport),
+        .reserved = 0,
+    };
+
+    // TODO: GOP_CONNECT is not defined in the WINC1500 API
+    // TCP client connections may work differently (bind+send initiates connection)
+    printf("WARNING: put_sock_connect() not fully implemented\n");
+    return false;
 
 bool get_sock_data(uint8_t sock, void *data, int len) {
     SOCKET *sp = &g_ctx.sockets[sock];
@@ -688,23 +730,26 @@ static void check_sock(uint16_t gop, RESP_MSG *rmp) {
     uint8_t sock, sock2;
 
     if (gop == GOP_DHCP_CONF || gop == GOP_AP_ENABLE || gop == GOP_DHCP_CONF_AP) {
-        // Bind all pending sockets when DHCP completes (client) or AP enables (AP mode)
-        const char *event_name = (gop == GOP_DHCP_CONF) ? "GOP_DHCP_CONF" :
-                                  (gop == GOP_AP_ENABLE) ? "GOP_AP_ENABLE" : "GOP_DHCP_CONF_AP";
-        printf("[%s] Checking for sockets to bind...\n", event_name);
+        const char *event_name = (gop == GOP_DHCP_CONF) ? "DHCP complete for client mode" :
+                                  (gop == GOP_AP_ENABLE) ? "AP mode enabled" : "DHCP conf for AP mode";
+        printf("[SOCKET] %s, binding pending sockets...\n", event_name);
+
+        if (gop == GOP_AP_ENABLE || gop == GOP_DHCP_CONF_AP) {
+            printf("[SOCKET] Network ready, binding immediately\n");
+        }
+
         int bound_count = 0;
         for (sock = MIN_SOCKET; sock < MAX_SOCKETS; sock++) {
             sp = &g_ctx.sockets[sock];
             if (sp->state == STATE_BINDING) {
-                printf("[EVENT] Binding socket %d (port=%d)\n", sock, sp->localport);
+                printf("[SOCKET] Binding socket %d to port %d\n", sock, sp->localport);
                 put_sock_bind(sock, sp->localport);
                 bound_count++;
             }
         }
-        if (bound_count == 0) {
-            printf("[EVENT] No sockets in STATE_BINDING to bind\n");
-        } else {
-            printf("[EVENT] Sent bind command for %d socket(s)\n", bound_count);
+
+        if (bound_count > 0) {
+            printf("[SOCKET] Bound %d socket(s)\n", bound_count);
         }
     }
     else if (gop == GOP_BIND && (sock = rmp->bind.sock) < MAX_SOCKETS &&
@@ -1077,6 +1122,40 @@ uint8_t winc_get_node_id(void) {
 
 const char* winc_get_node_name(void) {
     return g_ctx.mesh.my_name;
+}
+
+bool winc_is_network_ready(void) {
+    if (g_ctx.connection_state.ap_mode == false) {
+        return g_ctx.connection_state.connected && g_ctx.connection_state.dhcp_done;
+    }
+    return g_ctx.connection_state.ap_mode;
+}
+
+bool winc_wait_for_network(uint32_t timeout_ms) {
+    uint32_t start = to_ms_since_boot(get_absolute_time());
+
+    printf("\nWaiting for network to stabilize...\n");
+    uint32_t stabilize_start = to_ms_since_boot(get_absolute_time());
+
+    while ((to_ms_since_boot(get_absolute_time()) - stabilize_start) < 3000) {
+        winc_poll();
+
+        if (g_ctx.connection_state.connected && g_ctx.connection_state.dhcp_done) {
+            printf("Network ready (connected=%d, dhcp=%d)\n",
+                   g_ctx.connection_state.connected, g_ctx.connection_state.dhcp_done);
+            break;
+        }
+        sleep_ms(100);
+    }
+
+    if (!g_ctx.connection_state.connected || !g_ctx.connection_state.dhcp_done) {
+        printf("ERROR: Network not ready after stabilization period\n");
+        printf("  connected=%d, dhcp_done=%d\n",
+               g_ctx.connection_state.connected, g_ctx.connection_state.dhcp_done);
+        return false;
+    }
+
+    return true;
 }
 
 // Note: winc_mesh_init and winc_mesh_process are implemented in winc_mesh.c

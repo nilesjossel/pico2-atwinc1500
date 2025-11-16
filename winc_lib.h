@@ -216,6 +216,21 @@ bool winc_stop_ap(void);
  */
 bool winc_connect_sta(const char *ssid, const char *password);
 
+/**
+ * Check if network is ready
+ *
+ * @return true if connected and DHCP complete
+ */
+bool winc_is_network_ready(void);
+
+/**
+ * Wait for network to be ready with timeout
+ *
+ * @param timeout_ms Timeout in milliseconds
+ * @return true if network ready, false if timeout
+ */
+bool winc_wait_for_network(uint32_t timeout_ms);
+
 // ============================================================================
 // INTERNAL TYPES (for advanced users)
 // ============================================================================
@@ -310,6 +325,7 @@ typedef struct {
 #define GOP_SENDTO          GIDOP(GID_IP,   71)
 #define GOP_RECVFROM        GIDOP(GID_IP,   72)
 #define GOP_CLOSE           GIDOP(GID_IP,   73)
+#define GPO_CONNECT         GIDOP(GID_WIFI, 74)
 
 #define HIF_HDR_SIZE        8
 #define ANY_CHAN        255
@@ -319,7 +335,6 @@ typedef struct {
 #define CRED_STORE      3
 #define REQ_DATA        0x80
 
-// AP Mode operations (around line 280)
 #define GOP_AP_ENABLE       GIDOP(GID_WIFI, 71)  // Enable AP mode
 #define GOP_AP_DISABLE      GIDOP(GID_WIFI, 72)  // Disable AP mode  
 #define GOP_AP_ASSOC_INFO   GIDOP(GID_WIFI, 75)  // Client association info
@@ -338,6 +353,7 @@ typedef struct {
 #define STATE_BOUND     2
 #define STATE_ACCEPTED  3
 #define STATE_CONNECTED 4
+#define STATE_CONNECTING 6
 #define UDP_DATA_OSET       68
 #define TCP_DATA_OSET       80
 

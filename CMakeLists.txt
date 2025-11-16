@@ -57,11 +57,27 @@ target_include_directories(winc1500 PUBLIC
 
 target_link_libraries(winc1500
     pico_stdlib
+    pico_multicore
     hardware_spi
     hardware_irq
     hardware_interp
     hardware_clocks
+    hardware_crc
+    hardware_gpio
+    hardware_adc
+    hardware_watchdog
+    hardware_dma
 )
+
+# Commented out - main.c does not exist
+# add_executable(telemetry_system
+#     main.c
+#     winc_telemetry.c
+#     winc_lib.c
+#     winc_wifi.c
+#     winc_sock.c
+#     winc_mesh.c
+# )
 
 # ============================================================================
 # Main Executable: WINC1500_PICO2
@@ -87,6 +103,41 @@ endif()
 pico_enable_stdio_uart(WINC1500_PICO2 1)
 pico_enable_stdio_usb(WINC1500_PICO2 1)
 pico_add_extra_outputs(WINC1500_PICO2)
+
+# ============================================================================
+# Example: Test program
+# ============================================================================
+# Commented out - test directory and files do not exist
+# add_executable(test_tcp
+#     test/test_tcp.c
+#     winc_lib.c
+#     winc_wifi.c
+#     winc_sock.c
+# )
+#
+# target_link_libraries(test_tcp
+#     pico_stdlib
+#     hardware_spi
+#     hardware_gpio
+#     hardware_crc
+# )
+#
+# pico_enable_stdio_usb(test_tcp 1)
+# pico_add_extra_outputs(test_tcp)
+#
+# add_executable(test_crc
+#     test/test_crc.c
+#     winc_telemetry.c
+# )
+#
+# target_link_libraries(test_crc
+#     pico_stdlib
+#     hardware_crc
+#     hardware_dma
+# )
+#
+# pico_enable_stdio_usb(test_crc 1)
+# pico_add_extra_outputs(test_crc)
 
 # ============================================================================
 # Example: Mesh Network Node

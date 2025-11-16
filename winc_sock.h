@@ -32,6 +32,7 @@
 #define STATE_BOUND     2
 #define STATE_ACCEPTED  3
 #define STATE_CONNECTED 4
+#define STATE_CONNECTING 6
 
 // Offsets of Tx data, from end of HIF header
 #define UDP_DATA_OSET       68

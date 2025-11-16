@@ -77,6 +77,7 @@
 #define GOP_SENDTO          GIDOP(GID_IP,   71)
 #define GOP_RECVFROM        GIDOP(GID_IP,   72)
 #define GOP_CLOSE           GIDOP(GID_IP,   73)
+#define GPO_CONNECT         GIDOP(GID_WIFI, 74)
 
 // HIF header size (in bytes)
 #define HIF_HDR_SIZE        8
